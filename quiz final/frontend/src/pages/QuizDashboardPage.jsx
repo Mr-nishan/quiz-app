@@ -16,15 +16,48 @@ export default function QuizDashboardPage() {
     const [timerActive, setTimerActive] = useState(false);
     const [allTeamsFailed, setAllTeamsFailed] = useState(false);
     const [celebration, setCelebration] = useState(null);
+    const [holdQuestion, setHoldQuestion] = useState(false);
     const [resumeRestored, setResumeRestored] = useState(false);
 
     // Ref to track the current active state for polling without recreating loadGameState
-    const activeStateRef = useRef({ selectedQuestionId: null, isCelebrating: false });
+    const activeStateRef = useRef({
+        selectedQuestionId: null,
+        isCelebrating: false,
+        allTeamsFailed: false,
+        holdQuestion: false,
+    });
+    const correctSoundRef = useRef(null);
+    const wrongSoundRef = useRef(null);
+
+    useEffect(() => {
+        correctSoundRef.current = new Audio('/sounds/correct.wav');
+        wrongSoundRef.current = new Audio('/sounds/wrong.wav');
+
+        return () => {
+            correctSoundRef.current?.pause();
+            wrongSoundRef.current?.pause();
+        };
+    }, []);
+
+    const playAnswerSound = useCallback((result) => {
+        const audio = result === 'correct' ? correctSoundRef.current : wrongSoundRef.current;
+        if (!audio) return;
+
+        try {
+            audio.pause();
+            audio.currentTime = 0;
+            audio.play().catch(() => {});
+        } catch (err) {
+            console.warn('Failed to play answer sound', err);
+        }
+    }, []);
 
     useEffect(() => {
         activeStateRef.current.selectedQuestionId = selectedQuestion?.id || null;
         activeStateRef.current.isCelebrating = !!celebration;
-    }, [selectedQuestion, celebration]);
+        activeStateRef.current.allTeamsFailed = allTeamsFailed;
+        activeStateRef.current.holdQuestion = holdQuestion;
+    }, [selectedQuestion, celebration, allTeamsFailed, holdQuestion]);
 
     const loadGameState = useCallback(async () => {
         try {
@@ -36,7 +69,7 @@ export default function QuizDashboardPage() {
             setBoardQuestions(board);
 
             // Sync active question from polling (for presentation screens or multi-device)
-            const { selectedQuestionId, isCelebrating } = activeStateRef.current;
+            const { selectedQuestionId, isCelebrating, allTeamsFailed: activeAllTeamsFailed, holdQuestion: activeHoldQuestion } = activeStateRef.current;
             if (state.activeQuestion) {
                 if (selectedQuestionId !== state.activeQuestion.id) {
                     setSelectedQuestion(state.activeQuestion);
@@ -47,7 +80,7 @@ export default function QuizDashboardPage() {
                 }
             } else if (!state.activeQuestion && selectedQuestionId !== null) {
                 // Question was closed or answered by another screen
-                if (!isCelebrating) {
+                if (!isCelebrating && !activeAllTeamsFailed && !activeHoldQuestion) {
                     setSelectedQuestion(null);
                     setShowAnswer(false);
                     setTimerActive(false);
@@ -55,8 +88,10 @@ export default function QuizDashboardPage() {
                     setTimer(40);
                 }
             }
+            return state;
         } catch (err) {
             console.error('Failed to load game state:', err);
+            return null;
         } finally {
             setLoading(false);
         }
@@ -144,38 +179,34 @@ export default function QuizDashboardPage() {
         setTimerActive(false);
         try {
             const data = await quizApi.answer(id, selectedQuestion.id, result);
+            playAnswerSound(result);
 
             if (data.allTeamsFailed) {
-                setShowAnswer(false);
                 setAllTeamsFailed(true);
-                setTimer(40);
-            } else if (result === 'wrong') {
+                setHoldQuestion(true);
+                setShowAnswer(false);
+                setTimerActive(false);
+                await loadGameState();
+                return;
+            }
+
+            if (result === 'wrong') {
                 // Wrong but other teams still get a chance — keep question active in DB
                 setShowAnswer(false);
                 setTimer(40);
                 setTimerActive(true);
-            } else {
-                // Correct — trigger celebration with answer revealed
-                setCelebration({
-                    teamName: gameState?.currentTeam?.team_name || 'Team',
-                    points: selectedQuestion.points,
-                });
-                setShowAnswer(true);
-                setTimeout(async () => {
-                    await loadGameState();
-                    setSelectedQuestion(null);
-                    setShowAnswer(false);
-                    setCelebration(null);
-                    setTimer(40);
-                }, 3000);
+                await loadGameState();
                 return;
             }
 
-            if (data.gameOver) {
-                navigate(`/events/${id}/results`);
-                return;
-            }
-
+            // Correct — reveal answer automatically, show celebration, and keep question displayed until the host proceeds
+            setCelebration({
+                teamName: gameState?.currentTeam?.team_name || 'Team',
+                points: selectedQuestion.points,
+            });
+            setHoldQuestion(true);
+            setShowAnswer(true);
+            setTimerActive(false);
             await loadGameState();
         } catch (err) {
             alert(err.message || 'Failed to record answer');
@@ -196,22 +227,27 @@ export default function QuizDashboardPage() {
         setTimerActive(false);
         setAllTeamsFailed(false);
         setCelebration(null);
+        setHoldQuestion(false);
         setTimer(40);
     };
 
-    const handleNextAfterAllFailed = async () => {
+    const handleProceedToNextQuestion = async () => {
         setActionLoading(true);
         try {
-            await quizApi.nextTeam(id);
-            await loadGameState();
+            const updatedState = await loadGameState();
             setSelectedQuestion(null);
             setShowAnswer(false);
             setTimerActive(false);
             setAllTeamsFailed(false);
             setCelebration(null);
+            setHoldQuestion(false);
             setTimer(40);
+
+            if (updatedState?.event?.status === 'completed') {
+                navigate(`/events/${id}/results`);
+            }
         } catch (err) {
-            console.error('Failed to advance turn:', err);
+            console.error('Failed to advance question:', err);
         } finally {
             setActionLoading(false);
         }
@@ -233,6 +269,13 @@ export default function QuizDashboardPage() {
         return () => clearInterval(interval);
     }, [timerActive, timer, selectedQuestion, gameState?.event?.status, allTeamsFailed, celebration]);
 
+    // Auto-hide the celebration overlay after 5 seconds while leaving the answer visible
+    useEffect(() => {
+        if (!celebration) return;
+        const timeout = setTimeout(() => setCelebration(null), 5000);
+        return () => clearTimeout(timeout);
+    }, [celebration]);
+
     // Reset timer when question is deselected
     useEffect(() => {
         if (!selectedQuestion) {
@@ -253,6 +296,59 @@ export default function QuizDashboardPage() {
             setActionLoading(false);
         }
     };
+
+    useEffect(() => {
+        const handleShortcut = (event) => {
+            const target = event.target;
+            const tagName = target?.tagName;
+            const isTyping =
+                tagName === 'INPUT' ||
+                tagName === 'TEXTAREA' ||
+                tagName === 'SELECT' ||
+                target?.isContentEditable;
+
+            if (isTyping || event.altKey || event.ctrlKey || event.metaKey || actionLoading) return;
+            if (!selectedQuestion || gameState?.event?.status !== 'in_progress') return;
+
+            const key = event.key.toLowerCase();
+            const canGradeAnswer = !allTeamsFailed && !celebration && !holdQuestion;
+            const canProceed = celebration || allTeamsFailed || holdQuestion;
+            const canRevealAnswer = allTeamsFailed && !showAnswer;
+
+            if (key === 'c' && canGradeAnswer) {
+                event.preventDefault();
+                handleAnswer('correct');
+            } else if (key === 'w' && canGradeAnswer) {
+                event.preventDefault();
+                handleAnswer('wrong');
+            } else if (key === 'n' && canProceed) {
+                event.preventDefault();
+                handleProceedToNextQuestion();
+            } else if (key === 'r' && canRevealAnswer) {
+                event.preventDefault();
+                setShowAnswer(true);
+            }
+        };
+
+        window.addEventListener('keydown', handleShortcut);
+        return () => window.removeEventListener('keydown', handleShortcut);
+    }, [
+        actionLoading,
+        allTeamsFailed,
+        celebration,
+        gameState?.event?.status,
+        handleAnswer,
+        handleProceedToNextQuestion,
+        holdQuestion,
+        selectedQuestion,
+        showAnswer,
+    ]);
+
+    const ShortcutKey = ({ children }) => (
+        <span className="inline-flex h-6 min-w-6 items-center justify-center rounded-md border border-white/40 bg-white/20 px-1.5 text-xs font-extrabold">
+            {children}
+        </span>
+    );
 
     const getQuestionDisplay = (q) => {
         const prefix = {
@@ -371,149 +467,156 @@ export default function QuizDashboardPage() {
                     {/* Left: Question Board */}
                     <div className="lg:col-span-3">
                         {selectedQuestion ? (
-                            <div className="card">
-                                {/* Current Team Turn Banner inside Question View */}
-                                {!allTeamsFailed && !celebration && event.status === 'in_progress' && currentTeam && (
-                                    <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 mb-4 flex items-center justify-between">
-                                        <div className="flex items-center gap-3">
-                                            <div className="text-sm text-blue-600 font-medium">Currently Answering:</div>
-                                            <div className="text-lg font-bold text-blue-900">{currentTeam.team_name}</div>
+                            <div className="card p-6 space-y-6">
+                                <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+                                    <div className="space-y-3">
+                                        <div className="flex flex-wrap items-center gap-3">
+                                            <span className={`badge ${selectedQuestion.difficulty === 'easy' ? 'badge-easy' :
+                                                selectedQuestion.difficulty === 'medium' ? 'badge-medium' : 'badge-hard'
+                                                } text-base px-4 py-1`}>
+                                                {selectedQuestion.difficulty.charAt(0).toUpperCase() + selectedQuestion.difficulty.slice(1)}
+                                            </span>
+                                            <span className="text-sm text-gray-500 font-semibold">
+                                                {selectedQuestion.points} points
+                                            </span>
+                                            <span className="text-sm text-gray-500 font-medium">
+                                                • Question #{selectedQuestion.sort_order || selectedQuestion.id}
+                                            </span>
                                         </div>
-                                        <div className="flex items-center gap-3">
-                                            <div className="text-right">
-                                                <div className="text-sm text-blue-600 font-medium">Score</div>
-                                                <div className="text-lg font-bold text-blue-900">{currentTeam.score}</div>
+                                        <div className="text-gray-700 text-sm">Host Control</div>
+                                    </div>
+                                    <button
+                                        onClick={handleCloseQuestion}
+                                        className="self-start text-xs text-gray-400 hover:text-gray-600 border border-gray-200 rounded-lg px-2.5 py-1"
+                                    >
+                                        Close Question ✕
+                                    </button>
+                                </div>
+
+                                <div className="flex flex-col gap-6">
+                                    <div className="order-2 space-y-6">
+                                        <p className="text-4xl md:text-5xl lg:text-6xl text-gray-900 leading-tight font-extrabold">
+                                            {selectedQuestion.question}
+                                        </p>
+
+                                        {selectedQuestion.image_url && (
+                                            <div className="rounded-xl overflow-hidden border border-gray-200 max-h-60 bg-gray-100 flex items-center justify-center">
+                                                <img
+                                                    src={selectedQuestion.image_url}
+                                                    alt="Question image"
+                                                    className="max-w-full max-h-60 object-contain"
+                                                    onError={(e) => { e.target.style.display = 'none'; }}
+                                                />
                                             </div>
-                                            {timerActive && (
-                                                <div className={`flex items-center gap-1.5 font-bold text-lg tabular-nums ${timer <= 10 ? 'text-red-600 animate-pulse' : 'text-gray-700'}`}>
-                                                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-                                                    </svg>
-                                                    {timer}s
-                                                </div>
+                                        )}
+
+                                        {selectedQuestion.link_url && (
+                                            <a
+                                                href={selectedQuestion.link_url}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                className="inline-flex items-center gap-1.5 text-sm text-blue-600 hover:text-blue-800"
+                                            >
+                                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                                                </svg>
+                                                Reference Link
+                                            </a>
+                                        )}
+
+                                        <div className="bg-gray-50 rounded-xl p-4 border border-gray-200">
+                                            <div className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Correct Answer</div>
+                                            {showAnswer ? (
+                                                <p className="text-lg font-bold text-green-700 bg-green-50 border border-green-200 p-2 rounded-lg">
+                                                    {selectedQuestion.answer}
+                                                </p>
+                                            ) : allTeamsFailed ? (
+                                                <button
+                                                    onClick={() => setShowAnswer(true)}
+                                                    className="w-full py-2 px-4 rounded-lg bg-orange-400 text-white font-semibold text-sm hover:bg-orange-500 transition-colors shadow-sm"
+                                                    aria-keyshortcuts="R"
+                                                >
+                                                    <span className="inline-flex items-center justify-center gap-2">
+                                                        Show Answer
+                                                        <ShortcutKey>R</ShortcutKey>
+                                                    </span>
+                                                </button>
+                                            ) : (
+                                                <p className="text-sm text-gray-500">
+                                                    Answer hidden until the question is over.
+                                                </p>
                                             )}
                                         </div>
                                     </div>
-                                )}
 
-                                {/* All Teams Failed Banner */}
-                                {allTeamsFailed && (
-                                    <div className="bg-gray-100 border border-gray-300 rounded-xl p-4 mb-4">
-                                        <div className="text-center">
-                                            <div className="text-lg font-bold text-gray-600 mb-1">⏱ Time's Up! Question Attempt Finished</div>
-                                            <p className="text-sm text-gray-500">All teams failed — no points awarded.</p>
-                                        </div>
-                                    </div>
-                                )}
-
-                                <div className="flex items-center justify-between mb-6">
-                                    <div className="flex items-center gap-3">
-                                        <span className={`badge ${selectedQuestion.difficulty === 'easy' ? 'badge-easy' :
-                                            selectedQuestion.difficulty === 'medium' ? 'badge-medium' : 'badge-hard'
-                                            } text-base px-4 py-1`}>
-                                            {selectedQuestion.difficulty.charAt(0).toUpperCase() + selectedQuestion.difficulty.slice(1)}
-                                        </span>
-                                        <span className="text-sm text-gray-500">
-                                            {selectedQuestion.points} points
-                                        </span>
-                                        <span className="text-sm text-gray-500">
-                                            • Question #{selectedQuestion.sort_order || selectedQuestion.id}
-                                        </span>
-                                    </div>
-                                    <div className="flex items-center gap-3">
-                                        <button
-                                            onClick={handleCloseQuestion}
-                                            className="text-sm text-gray-400 hover:text-gray-600 border border-gray-200 rounded-lg px-3 py-1.5"
-                                        >
-                                            Close Question ✕
-                                        </button>
-                                    </div>
-                                </div>
-
-                                <div className="mb-8">
-                                    {selectedQuestion.image_url && (
-                                        <div className="mb-4 rounded-xl overflow-hidden border border-gray-200 max-h-80">
-                                            <img
-                                                src={selectedQuestion.image_url}
-                                                alt="Question image"
-                                                className="w-full max-h-80 object-contain bg-gray-100"
-                                                onError={(e) => { e.target.style.display = 'none'; }}
-                                            />
-                                        </div>
-                                    )}
-                                    <p className="text-4xl md:text-5xl text-gray-900 leading-normal font-semibold">
-                                        {selectedQuestion.question}
-                                    </p>
-                                    {selectedQuestion.link_url && (
-                                        <a
-                                            href={selectedQuestion.link_url}
-                                            target="_blank"
-                                            rel="noopener noreferrer"
-                                            className="inline-flex items-center gap-1.5 text-sm text-blue-600 hover:text-blue-800 mt-3"
-                                        >
-                                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-                                            </svg>
-                                            Reference Link
-                                        </a>
-                                    )}
-                                </div>
-
-                                {/* Answer Section */}
-                                <div className="mb-8">
-                                    {showAnswer ? (
-                                        <div className={`rounded-lg p-6 ${allTeamsFailed
-                                            ? 'bg-orange-50 border border-orange-200'
-                                            : 'bg-green-50 border border-green-200'
-                                            }`}>
-                                            <div className={`text-sm font-medium mb-2 ${allTeamsFailed ? 'text-orange-700' : 'text-green-700'}`}>
-                                                {allTeamsFailed ? 'Answer (Revealed for all):' : 'Answer:'}
+                                    <div className="contents">
+                                        {!allTeamsFailed && !celebration && event.status === 'in_progress' && currentTeam && (
+                                            <div className="order-1 bg-blue-50 border border-blue-200 rounded-xl p-4">
+                                                <div className="flex items-center justify-between mb-2">
+                                                    <span className="text-xs text-blue-600 font-bold uppercase tracking-wider">Current Turn</span>
+                                                    {timerActive && (
+                                                        <div className={`flex items-center gap-1 font-bold text-base tabular-nums ${timer <= 10 ? 'text-red-600 animate-pulse' : 'text-gray-700'}`}>
+                                                            <svg className="w-4.5 h-4.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                                            </svg>
+                                                            {timer}s
+                                                        </div>
+                                                    )}
+                                                </div>
+                                                <div className="text-xl font-extrabold text-blue-900 mb-1">{currentTeam.team_name}</div>
+                                                <div className="text-xs text-blue-700">Team Score: <span className="font-bold">{currentTeam.score} pts</span></div>
                                             </div>
-                                            <p className={`text-xl font-semibold ${allTeamsFailed ? 'text-orange-900' : 'text-green-900'}`}>
-                                                {selectedQuestion.answer}
-                                            </p>
-                                        </div>
-                                    ) : (
-                                        <button
-                                            onClick={() => setShowAnswer(true)}
-                                            className="btn-warning"
-                                        >
-                                            Show Answer
-                                        </button>
-                                    )}
-                                </div>
+                                        )}
 
-                                {/* Host Controls */}
-                                {event.status === 'in_progress' && !celebration && (
-                                    <div className="flex gap-3 pt-4 border-t border-gray-200">
-                                        {allTeamsFailed ? (
-                                            <button
-                                                onClick={handleNextAfterAllFailed}
-                                                disabled={actionLoading}
-                                                className="btn-primary flex-1 text-lg py-4"
-                                            >
-                                                Next Question →
-                                            </button>
-                                        ) : (
-                                            <>
-                                                <button
-                                                    onClick={() => handleAnswer('correct')}
-                                                    disabled={actionLoading}
-                                                    className="btn-success flex-1 text-lg py-4"
-                                                >
-                                                    ✓ Correct (+{selectedQuestion.points} pts)
-                                                </button>
-                                                <button
-                                                    onClick={() => handleAnswer('wrong')}
-                                                    disabled={actionLoading}
-                                                    className="btn-danger flex-1 text-lg py-4"
-                                                >
-                                                    ✗ Wrong (0 pts)
-                                                </button>
-                                            </>
+                                        {allTeamsFailed && (
+                                            <div className="order-1 bg-gray-100 border border-gray-300 rounded-xl p-4 text-center">
+                                                <div className="text-base font-bold text-gray-700 mb-1">⏱ Time's Up!</div>
+                                                <p className="text-xs text-gray-500">All teams failed — no points awarded.</p>
+                                            </div>
+                                        )}
+
+                                        {(celebration || allTeamsFailed || holdQuestion) && (
+                                        <div className="order-3 rounded-3xl bg-white border border-gray-200 p-4 shadow-sm">
+                                            {event.status === 'in_progress' && selectedQuestion && (
+                                                <div className="flex flex-col gap-3">
+                                                    {(celebration || allTeamsFailed || holdQuestion) ? (
+                                                        <button
+                                                            onClick={handleProceedToNextQuestion}
+                                                            disabled={actionLoading}
+                                                            aria-keyshortcuts="N"
+                                                            className="w-full py-3.5 px-4 rounded-xl bg-blue-600 text-white font-bold text-base hover:bg-blue-700 transition-colors shadow-md"
+                                                        >
+                                                            <ShortcutKey>N</ShortcutKey>
+                                                            Next Question →
+                                                        </button>
+                                                    ) : (
+                                                        <>
+                                                            <button
+                                                                onClick={() => handleAnswer('correct')}
+                                                                disabled={actionLoading}
+                                                                aria-keyshortcuts="C"
+                                                                className="w-full py-3 px-4 rounded-xl bg-green-600 text-white font-bold text-base hover:bg-green-700 transition-colors shadow-md"
+                                                            >
+                                                                <ShortcutKey>C</ShortcutKey>
+                                                                ✓ Correct (+{selectedQuestion.points} pts)
+                                                            </button>
+                                                            <button
+                                                                onClick={() => handleAnswer('wrong')}
+                                                                disabled={actionLoading}
+                                                                aria-keyshortcuts="W"
+                                                                className="w-full py-3 px-4 rounded-xl bg-red-600 text-white font-bold text-base hover:bg-red-700 transition-colors shadow-md"
+                                                            >
+                                                                <ShortcutKey>W</ShortcutKey>
+                                                                ✗ Wrong (0 pts)
+                                                            </button>
+                                                        </>
+                                                    )}
+                                                </div>
+                                            )}
+                                        </div>
                                         )}
                                     </div>
-                                )}
+                                </div>
                             </div>
                         ) : (
                             <>

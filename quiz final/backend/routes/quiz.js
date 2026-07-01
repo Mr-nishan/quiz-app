@@ -6,28 +6,9 @@ const router = express.Router();
 
 router.use(authMiddleware);
 
-function reconcileEventStatus(eventId) {
-    const event = queryGet('SELECT * FROM events WHERE id = ?', [eventId]);
-    if (!event) {
-        return null;
-    }
-
-    const remainingCount = queryGet(
-        'SELECT COUNT(*) as count FROM questions WHERE event_id = ? AND used = 0',
-        [eventId]
-    );
-
-    if (remainingCount && remainingCount.count === 0 && event.status !== 'completed') {
-        queryRun("UPDATE events SET status = 'completed' WHERE id = ?", [eventId]);
-        event.status = 'completed';
-    }
-
-    return event;
-}
-
 // POST /api/quiz/:eventId/start
 router.post('/:eventId/start', (req, res) => {
-    const event = reconcileEventStatus(req.params.eventId);
+    const event = queryGet('SELECT * FROM events WHERE id = ?', [req.params.eventId]);
     if (!event) {
         return res.status(404).json({ error: 'Event not found' });
     }
@@ -84,20 +65,13 @@ router.post('/:eventId/start', (req, res) => {
 
 // GET /api/quiz/:eventId/resume
 router.get('/:eventId/resume', (req, res) => {
-    const event = reconcileEventStatus(req.params.eventId);
-    const eventWithStats = event ? queryGet(`
+    const event = queryGet(`
     SELECT e.*,
       (SELECT COUNT(*) FROM questions WHERE event_id = e.id AND used = 0) as remaining_questions,
       (SELECT COUNT(*) FROM questions WHERE event_id = e.id) as total_questions,
       (SELECT COUNT(*) FROM teams WHERE event_id = e.id) as total_teams
     FROM events e WHERE e.id = ?
-  `, [req.params.eventId]) : null;
-
-    if (!eventWithStats) {
-        return res.status(404).json({ error: 'Event not found' });
-    }
-
-    const eventData = { ...eventWithStats, status: event?.status || eventWithStats.status };
+  `, [req.params.eventId]);
 
     if (!event) {
         return res.status(404).json({ error: 'Event not found' });
@@ -105,29 +79,29 @@ router.get('/:eventId/resume', (req, res) => {
 
     // Parse team order
     let teamOrder = [];
-    try { teamOrder = JSON.parse(eventData.team_order || '[]'); } catch (e) { teamOrder = []; }
+    try { teamOrder = JSON.parse(event.team_order || '[]'); } catch (e) { teamOrder = []; }
 
     // Determine current team from current_turn
     let currentTeam = null;
-    if (eventData.status === 'in_progress' && teamOrder.length > 0) {
-        const teamId = teamOrder[eventData.current_turn % teamOrder.length];
+    if (event.status === 'in_progress' && teamOrder.length > 0) {
+        const teamId = teamOrder[event.current_turn % teamOrder.length];
         currentTeam = queryGet('SELECT * FROM teams WHERE id = ?', [teamId]);
     }
 
     let activeQuestion = null;
     let elapsedSeconds = 0;
-    if (eventData.active_question_id) {
+    if (event.active_question_id) {
         activeQuestion = queryGet('SELECT * FROM questions WHERE id = ? AND event_id = ?', [
-            eventData.active_question_id, req.params.eventId
+            event.active_question_id, req.params.eventId
         ]);
-        if (eventData.active_question_started_at) {
-            const elapsedResult = queryGet("SELECT CAST((julianday('now') - julianday(?)) * 86400 AS INTEGER) as elapsed", [eventData.active_question_started_at]);
+        if (event.active_question_started_at) {
+            const elapsedResult = queryGet("SELECT CAST((julianday('now') - julianday(?)) * 86400 AS INTEGER) as elapsed", [event.active_question_started_at]);
             if (elapsedResult) {
                 elapsedSeconds = elapsedResult.elapsed;
             }
         }
     }
-    eventData.elapsedSeconds = elapsedSeconds;
+    event.elapsedSeconds = elapsedSeconds;
 
     // Get all teams with scores
     const teams = queryAll('SELECT * FROM teams WHERE event_id = ? ORDER BY score DESC', [req.params.eventId]);
@@ -161,19 +135,19 @@ router.get('/:eventId/resume', (req, res) => {
     ).map(q => q.id);
 
     res.json({
-        event: eventData,
+        event,
         currentTeam,
         activeQuestion,
         scores,
         teams,
         teamOrder,
-        currentTurn: eventData.current_turn,
+        currentTurn: event.current_turn,
         remainingQuestions,
         usedQuestions,
         gameHistory,
         stats: {
             remainingQuestions: remainingQuestions.length,
-            totalQuestions: eventData.total_questions || 0,
+            totalQuestions: event.total_questions || 0,
             usedQuestions: usedQuestions.length
         }
     });
@@ -244,19 +218,12 @@ router.post('/:eventId/cancel-select', (req, res) => {
 
 // GET /api/quiz/:eventId/state
 router.get('/:eventId/state', (req, res) => {
-    const event = reconcileEventStatus(req.params.eventId);
-    const eventWithStats = event ? queryGet(`
+    const event = queryGet(`
     SELECT e.*,
       (SELECT COUNT(*) FROM questions WHERE event_id = e.id AND used = 0) as remaining_questions,
       (SELECT COUNT(*) FROM teams WHERE event_id = e.id) as total_teams
     FROM events e WHERE e.id = ?
-  `, [req.params.eventId]) : null;
-
-    if (!eventWithStats) {
-        return res.status(404).json({ error: 'Event not found' });
-    }
-
-    const eventData = { ...eventWithStats, status: event?.status || eventWithStats.status };
+  `, [req.params.eventId]);
 
     if (!event) {
         return res.status(404).json({ error: 'Event not found' });
@@ -264,27 +231,27 @@ router.get('/:eventId/state', (req, res) => {
 
     const teams = queryAll('SELECT * FROM teams WHERE event_id = ? ORDER BY score DESC', [req.params.eventId]);
     let teamOrder = [];
-    try { teamOrder = JSON.parse(eventData.team_order || '[]'); } catch (e) { teamOrder = []; }
+    try { teamOrder = JSON.parse(event.team_order || '[]'); } catch (e) { teamOrder = []; }
 
     let currentTeam = null;
-    if (eventData.status === 'in_progress' && teamOrder.length > 0) {
-        const teamId = teamOrder[eventData.current_turn % teamOrder.length];
+    if (event.status === 'in_progress' && teamOrder.length > 0) {
+        const teamId = teamOrder[event.current_turn % teamOrder.length];
         currentTeam = queryGet('SELECT * FROM teams WHERE id = ?', [teamId]);
     }
 
     // Get active question
     let activeQuestion = null;
     let elapsedSeconds = 0;
-    if (eventData.active_question_id) {
-        activeQuestion = queryGet('SELECT * FROM questions WHERE id = ?', [eventData.active_question_id]);
-        if (eventData.active_question_started_at) {
-            const elapsedResult = queryGet("SELECT CAST((julianday('now') - julianday(?)) * 86400 AS INTEGER) as elapsed", [eventData.active_question_started_at]);
+    if (event.active_question_id) {
+        activeQuestion = queryGet('SELECT * FROM questions WHERE id = ?', [event.active_question_id]);
+        if (event.active_question_started_at) {
+            const elapsedResult = queryGet("SELECT CAST((julianday('now') - julianday(?)) * 86400 AS INTEGER) as elapsed", [event.active_question_started_at]);
             if (elapsedResult) {
                 elapsedSeconds = elapsedResult.elapsed;
             }
         }
     }
-    eventData.elapsedSeconds = elapsedSeconds;
+    event.elapsedSeconds = elapsedSeconds;
 
     const stats = queryGet(`
     SELECT
@@ -303,7 +270,7 @@ router.get('/:eventId/state', (req, res) => {
   `, [req.params.eventId]);
 
     res.json({
-        event: eventData,
+        event,
         teams,
         currentTeam,
         activeQuestion,

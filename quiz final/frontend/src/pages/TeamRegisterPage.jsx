@@ -11,6 +11,15 @@ export default function TeamRegisterPage() {
     const [editingId, setEditingId] = useState(null);
     const [editName, setEditName] = useState('');
 
+    const normalizeTeamName = (name) => name.trim().toLowerCase();
+
+    const teamNameExists = (name, ignoredTeamId = null) => {
+        const normalizedName = normalizeTeamName(name);
+        return teamList.some((team) =>
+            team.id !== ignoredTeamId && normalizeTeamName(team.team_name) === normalizedName
+        );
+    };
+
     useEffect(() => {
         loadTeams();
     }, [id]);
@@ -28,10 +37,16 @@ export default function TeamRegisterPage() {
 
     const handleAddTeam = async (e) => {
         e.preventDefault();
-        if (!newTeamName.trim()) return;
+        const trimmedName = newTeamName.trim();
+        if (!trimmedName) return;
+
+        if (teamNameExists(trimmedName)) {
+            alert('A team with this name is already registered');
+            return;
+        }
 
         try {
-            await teamsApi.create(id, { team_name: newTeamName.trim() });
+            await teamsApi.create(id, { team_name: trimmedName });
             setNewTeamName('');
             loadTeams();
         } catch (err) {
@@ -40,9 +55,16 @@ export default function TeamRegisterPage() {
     };
 
     const handleEdit = async (teamId) => {
-        if (!editName.trim()) return;
+        const trimmedName = editName.trim();
+        if (!trimmedName) return;
+
+        if (teamNameExists(trimmedName, teamId)) {
+            alert('A team with this name is already registered');
+            return;
+        }
+
         try {
-            await teamsApi.update(id, teamId, { team_name: editName.trim() });
+            await teamsApi.update(id, teamId, { team_name: trimmedName });
             setEditingId(null);
             setEditName('');
             loadTeams();

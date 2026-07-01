@@ -18,6 +18,7 @@ export default function QuestionManagePage() {
     const [showForm, setShowForm] = useState(false);
     const [editingId, setEditingId] = useState(null);
     const [formData, setFormData] = useState({ question: '', answer: '', difficulty: 'easy', link_url: '', image_url: '' });
+    const [imageError, setImageError] = useState(false);
 
     useEffect(() => {
         loadQuestions();
@@ -45,6 +46,7 @@ export default function QuestionManagePage() {
                 await questionsApi.create(id, formData);
             }
             setFormData({ question: '', answer: '', difficulty: 'easy', link_url: '', image_url: '' });
+            setImageError(false);
             setEditingId(null);
             setShowForm(false);
             loadQuestions();
@@ -55,6 +57,7 @@ export default function QuestionManagePage() {
 
     const handleEdit = (q) => {
         setFormData({ question: q.question, answer: q.answer, difficulty: q.difficulty, link_url: q.link_url || '', image_url: q.image_url || '' });
+        setImageError(false);
         setEditingId(q.id);
         setShowForm(true);
     };
@@ -127,7 +130,7 @@ export default function QuestionManagePage() {
                             Add Sample Questions
                         </button>
                         <button
-                            onClick={() => { setShowForm(true); setEditingId(null); setFormData({ question: '', answer: '', difficulty: 'easy', link_url: '', image_url: '' }); }}
+                            onClick={() => { setShowForm(true); setEditingId(null); setFormData({ question: '', answer: '', difficulty: 'easy', link_url: '', image_url: '' }); setImageError(false); }}
                             className="btn-primary text-sm py-2 px-4"
                         >
                             + Add Question
@@ -139,98 +142,110 @@ export default function QuestionManagePage() {
             <main className="max-w-6xl mx-auto px-6 py-8">
                 {/* Question Form Modal */}
                 {showForm && (
-                    <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50 p-4">
-                        <div className="card w-full max-w-2xl max-h-[90vh] overflow-y-auto">
-                            <h2 className="text-xl font-semibold mb-6">
-                                {editingId ? 'Edit Question' : 'Add New Question'}
-                            </h2>
-                            <form onSubmit={handleSubmit} className="space-y-5">
-                                <div>
-                                    <label className="label">Question *</label>
-                                    <textarea
-                                        className="input min-h-[80px] resize-y"
-                                        placeholder="Enter the question text"
-                                        value={formData.question}
-                                        onChange={(e) => setFormData({ ...formData, question: e.target.value })}
-                                        required
-                                        autoFocus
-                                    />
-                                </div>
+                    <div className="fixed inset-0 z-50 overflow-y-auto">
+                        {/* Backdrop */}
+                        <div 
+                            className="fixed inset-0 bg-black/45 transition-opacity" 
+                            onClick={() => { setShowForm(false); setEditingId(null); setImageError(false); }}
+                        />
 
-                                <div>
-                                    <label className="label">Answer *</label>
-                                    <input
-                                        type="text"
-                                        className="input"
-                                        placeholder="Enter the correct answer"
-                                        value={formData.answer}
-                                        onChange={(e) => setFormData({ ...formData, answer: e.target.value })}
-                                        required
-                                    />
-                                </div>
-
-                                <div>
-                                    <label className="label">Image URL (optional)</label>
-                                    <input
-                                        type="url"
-                                        className="input"
-                                        placeholder="https://example.com/image.jpg"
-                                        value={formData.image_url}
-                                        onChange={(e) => setFormData({ ...formData, image_url: e.target.value })}
-                                    />
-                                    {formData.image_url && (
-                                        <div className="mt-2 rounded-lg overflow-hidden border border-gray-200 max-h-40">
-                                            <img
-                                                src={formData.image_url}
-                                                alt="Preview"
-                                                className="w-full h-40 object-contain bg-gray-100"
-                                                onError={(e) => { e.target.style.display = 'none'; }}
-                                            />
-                                        </div>
-                                    )}
-                                </div>
-
-                                <div>
-                                    <label className="label">Link URL (optional)</label>
-                                    <input
-                                        type="url"
-                                        className="input"
-                                        placeholder="https://example.com/reference"
-                                        value={formData.link_url}
-                                        onChange={(e) => setFormData({ ...formData, link_url: e.target.value })}
-                                    />
-                                </div>
-
-                                <div>
-                                    <label className="label">Difficulty</label>
-                                    <div className="flex gap-3">
-                                        {DIFFICULTIES.map((d) => (
-                                            <button
-                                                key={d}
-                                                type="button"
-                                                onClick={() => setFormData({ ...formData, difficulty: d })}
-                                                className={`flex-1 py-3 px-4 rounded-lg border-2 text-center font-medium capitalize transition-colors ${formData.difficulty === d
-                                                    ? d === 'easy' ? 'border-green-400 bg-green-50 text-green-800'
-                                                        : d === 'medium' ? 'border-orange-400 bg-orange-50 text-orange-800'
-                                                            : 'border-red-400 bg-red-50 text-red-800'
-                                                    : 'border-gray-200 bg-white text-gray-500 hover:border-gray-300'
-                                                    }`}
-                                            >
-                                                {d} ({POINTS_MAP[d]} pts)
-                                            </button>
-                                        ))}
+                        {/* Scrollable Container */}
+                        <div className="flex min-h-full items-center justify-center p-4">
+                            <div className="relative card w-full max-w-2xl my-8 z-10">
+                                <h2 className="text-xl font-semibold mb-6">
+                                    {editingId ? 'Edit Question' : 'Add New Question'}
+                                </h2>
+                                <form onSubmit={handleSubmit} className="space-y-5">
+                                    <div>
+                                        <label className="label">Question *</label>
+                                        <textarea
+                                            className="input min-h-[80px] resize-y"
+                                            placeholder="Enter the question text"
+                                            value={formData.question}
+                                            onChange={(e) => setFormData({ ...formData, question: e.target.value })}
+                                            required
+                                            autoFocus
+                                        />
                                     </div>
-                                </div>
 
-                                <div className="flex gap-3 pt-2">
-                                    <button type="submit" className="btn-primary flex-1">
-                                        {editingId ? 'Update Question' : 'Add Question'}
-                                    </button>
-                                    <button type="button" onClick={() => { setShowForm(false); setEditingId(null); }} className="btn-secondary">
-                                        Cancel
-                                    </button>
-                                </div>
-                            </form>
+                                    <div>
+                                        <label className="label">Answer *</label>
+                                        <input
+                                            type="text"
+                                            className="input"
+                                            placeholder="Enter the correct answer"
+                                            value={formData.answer}
+                                            onChange={(e) => setFormData({ ...formData, answer: e.target.value })}
+                                            required
+                                        />
+                                    </div>
+
+                                    <div>
+                                        <label className="label">Image URL (optional)</label>
+                                        <input
+                                            type="url"
+                                            className="input"
+                                            placeholder="https://example.com/image.jpg"
+                                            value={formData.image_url}
+                                            onChange={(e) => {
+                                                setFormData({ ...formData, image_url: e.target.value });
+                                                setImageError(false);
+                                            }}
+                                        />
+                                        {formData.image_url && !imageError && (
+                                            <div className="mt-2 rounded-lg overflow-hidden border border-gray-200 max-h-40">
+                                                <img
+                                                    src={formData.image_url}
+                                                    alt="Preview"
+                                                    className="w-full h-40 object-contain bg-gray-100"
+                                                    onError={() => setImageError(true)}
+                                                />
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    <div>
+                                        <label className="label">Link URL (optional)</label>
+                                        <input
+                                            type="url"
+                                            className="input"
+                                            placeholder="https://example.com/reference"
+                                            value={formData.link_url}
+                                            onChange={(e) => setFormData({ ...formData, link_url: e.target.value })}
+                                        />
+                                    </div>
+
+                                    <div>
+                                        <label className="label">Difficulty</label>
+                                        <div className="flex gap-3">
+                                            {DIFFICULTIES.map((d) => (
+                                                <button
+                                                    key={d}
+                                                    type="button"
+                                                    onClick={() => setFormData({ ...formData, difficulty: d })}
+                                                    className={`flex-1 py-3 px-4 rounded-lg border-2 text-center font-medium capitalize transition-colors ${formData.difficulty === d
+                                                        ? d === 'easy' ? 'border-green-400 bg-green-50 text-green-800'
+                                                            : d === 'medium' ? 'border-orange-400 bg-orange-50 text-orange-800'
+                                                                : 'border-red-400 bg-red-50 text-red-800'
+                                                        : 'border-gray-200 bg-white text-gray-500 hover:border-gray-300'
+                                                        }`}
+                                                >
+                                                    {d} ({POINTS_MAP[d]} pts)
+                                                </button>
+                                            ))}
+                                        </div>
+                                    </div>
+
+                                    <div className="flex gap-3 pt-2">
+                                        <button type="submit" className="btn-primary flex-1">
+                                            {editingId ? 'Update Question' : 'Add Question'}
+                                        </button>
+                                        <button type="button" onClick={() => { setShowForm(false); setEditingId(null); setImageError(false); }} className="btn-secondary">
+                                            Cancel
+                                        </button>
+                                    </div>
+                                </form>
+                            </div>
                         </div>
                     </div>
                 )}

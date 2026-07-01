@@ -20,11 +20,6 @@ router.get('/', (req, res) => {
 
 // GET /api/events/:id
 router.get('/:id', (req, res) => {
-    const remainingCount = queryGet(
-        'SELECT COUNT(*) as count FROM questions WHERE event_id = ? AND used = 0',
-        [req.params.id]
-    );
-
     const event = queryGet(`
     SELECT e.*,
       (SELECT COUNT(*) FROM questions WHERE event_id = e.id) as total_questions,
@@ -35,11 +30,6 @@ router.get('/:id', (req, res) => {
 
     if (!event) {
         return res.status(404).json({ error: 'Event not found' });
-    }
-
-    if (remainingCount && remainingCount.count === 0 && event.status !== 'completed') {
-        queryRun("UPDATE events SET status = 'completed' WHERE id = ?", [req.params.id]);
-        event.status = 'completed';
     }
 
     try { event.team_order = JSON.parse(event.team_order || '[]'); } catch (e) { event.team_order = []; }
